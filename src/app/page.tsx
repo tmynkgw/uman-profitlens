@@ -3,7 +3,7 @@ import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { LayoutGrid, FolderOpen, Users, Building2, PenLine, Plus, Check, Pencil, Trash2, AlertTriangle, Download, Upload, Database, UserPlus, ChevronRight, Briefcase, DollarSign, TrendingUp, BarChart3, Target } from "lucide-react";
 import { CURRENT_MONTH, monthToFY, monthToFYQ, fyMonths, fyQMonths, fyLabel, getAllFYs, type Department, type Role, type Member, type Project, type Allocation } from "@/lib/data";
 import { fmt, fmtM, fmtPct, cn, genId, memberName } from "@/lib/utils";
-import { loadData, saveData, exportData, importData } from "@/lib/storage";
+import { loadData, saveData, exportData, importData, migrateFromLocalStorage } from "@/lib/storage";
 import { StatusBadge, DeptBadge, KpiCard, QuarterBarChart, HBar, WaterfallChart, AchievementRing, Modal, Field, inputCls, selectCls, btnPrimaryCls } from "@/components/ui";
 
 type Tab="dashboard"|"entry"|"projects"|"members"|"departments"|"roles";
@@ -31,7 +31,9 @@ function MemberMultiSelect({members,selected,onChange,depts,roles}:{members:Memb
 }
 
 export default function Home(){
+  const isDemo = process.env.NEXT_PUBLIC_IS_DEMO === 'true';
   const [loaded,setLoaded]=useState(false);
+  const [loading,setLoading]=useState(true);
   const [depts,setDepts]=useState<Department[]>([]);
   const [roles,setRoles]=useState<Role[]>([]);
   const [members,setMembers]=useState<Member[]>([]);
@@ -46,8 +48,43 @@ export default function Home(){
   const availFYs=useMemo(()=>{const fys=getAllFYs(allocs,projects);if(!fys.includes(currentFY))fys.push(currentFY);return fys.sort();},[allocs,projects,currentFY]);
   const fyMos=useMemo(()=>fyMonths(selectedFY),[selectedFY]);
 
-  useEffect(()=>{const d=loadData();setDepts(d.departments);setRoles(d.roles);setMembers(d.members);setProjects(d.projects);setAllocs(d.allocations);setLoaded(true);},[]);
-  const persist=useCallback(()=>{if(loaded)saveData({departments:depts,roles,members,projects,allocations:allocs});},[depts,roles,members,projects,allocs,loaded]);
+  // 初回データ読み込み (非同期対応 + localStorage移行)
+  useEffect(()=>{
+    (async()=>{
+      try{
+        // Step 1: localStorageからの移行を試行
+        const migratedCount = await migrateFromLocalStorage();
+        if(migratedCount !== null && migratedCount > 0){
+          console.log(`✅ ${migratedCount}件のデータをlocalStorageからSupabaseに移行しました`);
+          showToast(`${migratedCount}件のデータを移行しました`);
+        }
+
+        // Step 2: Supabaseからデータを読み込み
+        const d=await loadData();
+        setDepts(d.departments);
+        setRoles(d.roles);
+        setMembers(d.members);
+        setProjects(d.projects);
+        setAllocs(d.allocations);
+        setLoaded(true);
+      }catch(err){
+        console.error('Failed to load data:',err);
+        showToast('データ読み込みに失敗しました');
+      }finally{
+        setLoading(false);
+      }
+    })();
+  },[]);
+
+  // データ保存 (非同期対応 + デバウンス)
+  const persist=useCallback(()=>{
+    if(loaded){
+      saveData({departments:depts,roles,members,projects,allocations:allocs}).catch(err=>{
+        console.error('Failed to save data:',err);
+        showToast('データ保存に失敗しました');
+      });
+    }
+  },[depts,roles,members,projects,allocs,loaded]);
   useEffect(()=>{persist();},[persist]);
 
   const [modal,setModal]=useState<{type:string;mode:"add"|"edit";id?:string}|null>(null);
@@ -145,7 +182,8 @@ export default function Home(){
 
   const FYSel=()=>(<div className="flex gap-1.5 items-center flex-wrap"><span className="text-[11px] text-slate-400 font-semibold">年度:</span>{availFYs.map(fy=>(<button key={fy} onClick={()=>setSelectedFY(fy)} className={cn("px-3 py-1 rounded-lg text-xs font-semibold transition-all border",selectedFY===fy?"border-indigo-500 bg-indigo-50 text-indigo-600 border-2":"border-slate-200 bg-white text-slate-500 hover:bg-slate-50")}>{fyLabel(fy)}</button>))}</div>);
 
-  if(!loaded)return <div className="flex items-center justify-center min-h-screen text-slate-400">読み込み中...</div>;
+  // ローディング表示
+  if(loading)return <div className="flex items-center justify-center min-h-screen"><div className="text-center"><div className="w-12 h-12 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mx-auto mb-4"></div><p className="text-slate-400 text-sm">データを読み込み中...</p></div></div>;
 
   return(<div className="flex min-h-screen">
     {toast&&<div className="fixed top-6 right-6 z-[2000] flex items-center gap-2 bg-emerald-50 text-emerald-600 px-5 py-3 rounded-xl text-[13px] font-semibold shadow-lg border border-emerald-100 animate-slide-in"><Check size={16}/>{toast}</div>}
@@ -153,7 +191,10 @@ export default function Home(){
 
     <nav className="w-[230px] bg-white border-r border-slate-200 py-6 shrink-0 flex flex-col shadow-[1px_0_8px_rgba(0,0,0,0.03)]">
       <div className="px-5 mb-9">
-        <div className="text-xl font-extrabold tracking-tight bg-gradient-to-br from-indigo-600 to-violet-600 bg-clip-text text-transparent">ProfitLens</div>
+        <div className="flex items-center gap-2">
+          <div className="text-xl font-extrabold tracking-tight bg-gradient-to-br from-indigo-600 to-violet-600 bg-clip-text text-transparent">ProfitLens</div>
+          {isDemo && <span className="px-2 py-0.5 text-[9px] font-bold bg-orange-100 text-orange-600 rounded border border-orange-200">DEMO</span>}
+        </div>
         <div className="text-[10px] text-slate-400 mt-0.5 tracking-[1.5px] uppercase font-semibold">Consulting Manager</div>
       </div>
       {navItems.map(it=>(<button key={it.id} onClick={()=>setTab(it.id)} className={cn("flex items-center gap-2.5 w-full px-5 py-2.5 text-[13px] transition-all text-left",tab===it.id?"bg-indigo-50 text-indigo-600 font-bold border-l-[3px] border-indigo-600":"text-slate-500 font-medium border-l-[3px] border-transparent hover:bg-slate-50")}>{it.icon}{it.label}</button>))}
@@ -166,6 +207,16 @@ export default function Home(){
     </nav>
 
     <main className="flex-1 p-7 overflow-y-auto max-h-screen bg-slate-50">
+      {/* DEMO Banner */}
+      {isDemo && (
+        <div className="mb-6 bg-gradient-to-r from-orange-50 to-amber-50 border border-orange-200 rounded-xl p-4 flex items-center gap-3 shadow-sm">
+          <AlertTriangle size={20} className="text-orange-500 shrink-0"/>
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-orange-900">これはデモ版です</p>
+            <p className="text-xs text-orange-700 mt-0.5">データはSupabaseに保存されますが、テスト目的でのみ使用してください。</p>
+          </div>
+        </div>
+      )}
 
       {/* ── DASHBOARD ── */}
       {tab==="dashboard"&&(<div>
